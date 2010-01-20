@@ -17,8 +17,6 @@ rescue LoadError
   exit
 end
 
-# STODO disc, genre, comment, volume, date, etc
-
 class ITunes
   def self.import(flac, options={})
     iTunes = SBApplication.applicationWithBundleIdentifier 'com.apple.iTunes'
