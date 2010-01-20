@@ -1,0 +1,219 @@
+#!/usr/bin/env ruby
+# -*- ruby -*-
+require 'time'
+require 'tmpdir'
+require 'fileutils'
+require 'optparse'
+require 'find'
+
+F2AVERSION = "flac2aac v1"
+
+begin
+  require 'osx/cocoa'
+  include OSX
+  require_framework 'ScriptingBridge'
+rescue LoadError
+  puts "OSX Only"
+  exit
+end
+
+# STODO disc, genre, comment, volume, date, etc
+
+class ITunes
+  def self.import(flac, options={})
+    iTunes = SBApplication.applicationWithBundleIdentifier 'com.apple.iTunes'
+
+    file = NSURL.fileURLWithPath(flac.converted_file)
+    track = iTunes.add_to(file, nil)
+    if track
+      tag_track_with track, :album,            flac.meta.album
+      tag_track_with track, :artist,           flac.meta.artist
+      tag_track_with track, :name,             flac.meta.title
+      tag_track_with track, :trackNumber,      flac.meta.tracknumber
+      tag_track_with track, :discNumber,       flac.meta.discnumber
+      tag_track_with track, :genre,            flac.meta.genre
+      tag_track_with track, :comment,          flac.meta.comment
+      tag_track_with track, :year,             flac.meta.date
+      tag_track_with track, :volumeAdjustment, flac.meta.replaygain_track_gain
+    else
+      puts 'Failed to import'
+    end
+  end
+
+  def self.tag_track_with(track, tag, data)
+    track.send("#{tag}=", data)
+    sleep 0.1
+  end
+end
+
+class FlacMeta
+  attr_accessor :album
+  attr_accessor :album_version
+  attr_accessor :artist
+  attr_accessor :comment
+  attr_accessor :discnumber
+  attr_accessor :genre
+  attr_accessor :title
+  attr_accessor :track_version
+  attr_accessor :tracknumber
+  attr_accessor :replaygain_track_gain
+  attr_accessor :date
+
+  def initialize(flac, options={})
+    @options = options
+    tag_data = `metaflac --no-utf8-convert --export-tags-to=- #{flac.escaped_file_name}`
+    tag_data.each_line do |line|
+      tag, data = line.strip.split('=')
+      if self.respond_to?(tag.downcase)
+        self.send("#{tag.downcase}=", data)
+      end
+    end
+  end
+
+  def album
+    @album.nil? ? 'Unknown Album' : @album
+  end
+
+  def artist
+    @artist.nil? ? 'Unkown Artist' : @artist
+  end
+
+  def title
+    @title.nil? ? 'Unknown Title' : @title
+  end
+
+  def tracknumber
+    @tracknumber.to_i
+  end
+
+  def replaygain_track_gain
+    if @replaygain_track_gain.to_i == 0
+      0
+    else
+      @options[:ipod] ? ipod_replaygain : standard_replaygain
+    end
+  end
+
+  def date
+    @date.nil? ? nil : Time.parse(@date).year
+  end
+
+  private
+  def ipod_replaygain
+    ((-100 * (1 - ((10 ^ ((@replaygain_track_gain + (@options[:loudness] - 83))/20))/2)))/5.75).round
+  end
+
+  def standard_replaygain
+    (-100 * (1 - ((10 ^ ((@replaygain_track_gain + (@options[:loudness] - 83))/20))/2))).round
+  end
+end
+
+class Flac
+  attr_reader :file
+  attr_reader :meta
+  
+  def self.all(dir_or_file)
+    if File.directory?(dir_or_file)
+      flacs_for_dir(dir_or_file)
+    else
+      [self.new(dir_or_file)]
+    end
+  end
+
+  def self.flacs_for_dir(dir, flacs=[])
+    flacs = []
+    Find.find(dir) do |path|
+      if FileTest.directory?(path)
+        if File.basename(path)[0] == ?.
+          Find.prune
+        else
+          next
+        end
+      else
+        if File.extname(path) == '.flac'
+          flacs << self.new(path)
+        end
+      end
+    end
+    flacs.reverse
+  end
+
+  def initialize(file)
+    @file = file
+    @options = {}
+  end
+
+  def encode(options={})
+    @options = options
+    process_metadata
+    to_aac
+    add_artwork(options[:artwork])
+    ITunes.import(self, options)
+    cleanup
+  end
+
+  def escaped_file_name
+    String(file).gsub(/(?=[^a-zA-Z0-9_.\/\-\x7F-\xFF\n])/n, '\\').
+      gsub(/\n/, "'\n'").
+      sub(/^$/, "''")
+  end
+  
+  def output_dir
+    @output ||= File.join(Dir.tmpdir, "flac2aac-#{Time.now.to_f}")
+    FileUtils.mkdir_p(@output)
+    @output
+  end
+
+  def converted_file
+    File.join(output_dir, 'file.m4a')
+  end
+  
+  private
+  def process_metadata
+    @meta = FlacMeta.new(self, @options)
+  end
+  
+  def to_aac
+    `flac -s -d -f --force-aiff-format #{escaped_file_name} -o #{output_dir}/file.aiff`
+    `afconvert -q 127 -f mp4f -d aac #{output_dir}/file.aiff -o #{output_dir}/file.m4a`
+  end
+
+  def add_artwork(artwork)
+    cover = artwork || Dir.entries(File.dirname(@file)).grep(/\.?cover\.(jpe?g|gif|png)/).first
+    if cover
+      cover_path = File.join(File.dirname(@file), cover)
+      `#{File.dirname(__FILE__)}/addart #{cover_path} #{converted_file} 2>/dev/null`
+    end
+  end
+
+  def cleanup
+    FileUtils.rm_rf(output_dir)
+  end
+end
+
+
+
+
+
+
+options = {:loudness => 92, :ipod => false}
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: flac2aa [options] file_or_directory"
+  opts.on('-a', '--artwork FILE', 'Use FILE as the cover art')         {|f| options[:artwork] = f}
+  opts.on('-i', '--ipod', 'Optimize for ipod')                         {    options[:ipod] = true}
+  opts.on('-l', '--loudness VOLUME', 'Desired loudness [Default: 92]') {|l| options[:loudness] = l}
+  opts.on('-v', '--version', 'Display the version')                    {    puts F2AVERSION; exit }
+  opts.on('-h', '--help', 'Display this screen')                       {    puts opts; exit }
+end
+
+optparse.parse!
+
+if ARGV[0].nil?
+  puts optparse.help
+  exit
+end
+
+Flac.all(ARGV[0]).each do |flac|
+  puts "Processing #{File.basename(flac.file)} ..."
+  flac.encode(options)
+end

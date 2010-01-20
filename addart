@@ -1,0 +1,27 @@
+#!/usr/bin/env jruby
+require 'java'
+require File.dirname(__FILE__) + '/jaudiotagger-2.0.2-SNAPSHOT.jar'
+include_class 'org.jaudiotagger.audio.AudioFileIO'
+include_class 'org.jaudiotagger.tag.FieldKey'
+include_class 'java.io.RandomAccessFile'
+
+if ARGV[0].nil? || ARGV[1].nil?
+  puts "usage: addart <art> <mp4>"
+  exit
+end
+
+if !File.exist?(ARGV[0]) || !File.exist?(ARGV[1])
+  puts "files don't exist"
+  exit
+end
+
+f = AudioFileIO.read(java.io.File.new(ARGV[1]))
+tag = f.getTag()
+
+raw_image = java.io.File.new(ARGV[0])
+imageFile = RandomAccessFile.new(raw_image, "r")
+imagedata = Java::byte[imageFile.length()].new
+imageFile.read(imagedata)
+tag.addField(tag.createArtworkField(imagedata))
+
+f.commit()
